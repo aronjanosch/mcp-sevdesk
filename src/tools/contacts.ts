@@ -1,134 +1,112 @@
 import { z } from "zod";
-import type { SevdeskClient } from "../client.js";
+import { payload } from "../lib/format.js";
+import { fetchPage, paginationShape } from "../lib/pagination.js";
+import { defineTool } from "../lib/tool.js";
+import { unwrap } from "../lib/errors.js";
+
+const contactCategory = (id: number) => ({ id, objectName: "Category" as const });
 
 export const contactTools = {
-  list_contacts: {
-    description: "List all contacts from sevdesk. Supports filtering by various parameters.",
+  list_contacts: defineTool({
+    title: "List contacts",
+    description: "List contacts (customers, suppliers, partners) from sevdesk. Returns one page; use nextOffset to continue.",
+    access: "read",
     inputSchema: z.object({
-      depth: z.number().optional().describe("Defines depth of sub-objects returned"),
       customerNumber: z.string().optional().describe("Filter by customer number"),
       name: z.string().optional().describe("Filter by contact name"),
-      limit: z.number().optional().describe("Limit the number of results (max 1000)"),
-      offset: z.number().optional().describe("Skip a number of results"),
+      depth: z.union([z.literal(0), z.literal(1)]).optional().describe("0 = contacts only, 1 = include sub-objects such as the category"),
+      ...paginationShape,
     }),
-    handler: async (client: SevdeskClient, params: {
-      depth?: number;
-      customerNumber?: string;
-      name?: string;
-      limit?: number;
-      offset?: number;
-    }) => {
-      const { data, error } = await client.GET("/Contact", {
-        params: {
-          query: {
-            depth: params.depth as "0" | "1" | undefined,
-            customerNumber: params.customerNumber,
-            name: params.name,
-            limit: params.limit,
-            offset: params.offset,
-          },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: (client, params) =>
+      fetchPage(params, async (limit, offset) =>
+        unwrap(
+          await client.GET("/Contact", {
+            params: {
+              query: {
+                customerNumber: params.customerNumber,
+                name: params.name,
+                depth: params.depth === undefined ? undefined : (String(params.depth) as "0" | "1"),
+                limit,
+                offset,
+              },
+            },
+          })
+        )
+      ),
+  }),
 
-  get_contact: {
+  get_contact: defineTool({
+    title: "Get contact",
     description: "Get a specific contact by ID from sevdesk",
+    access: "read",
     inputSchema: z.object({
-      contactId: z.number().describe("The ID of the contact to retrieve"),
+      contactId: z.number().int().describe("The ID of the contact to retrieve"),
     }),
-    handler: async (client: SevdeskClient, params: { contactId: number }) => {
-      const { data, error } = await client.GET("/Contact/{contactId}", {
-        params: {
-          path: { contactId: params.contactId },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, params) =>
+      payload(await unwrap(await client.GET("/Contact/{contactId}", { params: { path: { contactId: params.contactId } } }))),
+  }),
 
-  create_contact: {
-    description: "Create a new contact in sevdesk",
+  get_next_customer_number: defineTool({
+    title: "Get next customer number",
+    description: "Get the next free customer number. Use it as customerNumber when creating a contact.",
+    access: "read",
+    inputSchema: z.object({}),
+    handler: async (client) => unwrap(await client.GET("/Contact/Factory/getNextCustomerNumber", {})),
+  }),
+
+  create_contact: defineTool({
+    title: "Create contact",
+    description: "Create a new contact in sevdesk. Use name for organizations, surename + familyname for persons.",
+    access: "write",
     inputSchema: z.object({
       name: z.string().optional().describe("The name of the contact (for organizations)"),
-      surename: z.string().optional().describe("The surname of the contact person"),
+      surename: z.string().optional().describe("The first name of the contact person"),
       familyname: z.string().optional().describe("The family name of the contact person"),
-      customerNumber: z.string().optional().describe("Customer number"),
+      customerNumber: z.string().optional().describe("Customer number, see get_next_customer_number"),
       description: z.string().optional().describe("Description of the contact"),
-      categoryId: z.number().describe("Category ID (3 = customer, 4 = supplier, 28 = partner)"),
+      categoryId: z.number().int().describe("Category ID (3 = customer, 4 = supplier, 28 = partner)"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      name?: string;
-      surename?: string;
-      familyname?: string;
-      customerNumber?: string;
-      description?: string;
-      categoryId: number;
-    }) => {
-      const { data, error } = await client.POST("/Contact", {
-        body: {
-          name: params.name,
-          surename: params.surename,
-          familyname: params.familyname,
-          customerNumber: params.customerNumber,
-          description: params.description,
-          category: {
-            id: params.categoryId,
-            objectName: "Category",
-          },
-        } as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
+    handler: async (client, params) => {
+      const { categoryId, ...fields } = params;
+      return payload(
+        unwrap(
+          await client.POST("/Contact", {
+            body: { ...fields, category: contactCategory(categoryId) } as never,
+          })
+        )
+      );
     },
-  },
+  }),
 
-  update_contact: {
-    description: "Update an existing contact in sevdesk",
+  update_contact: defineTool({
+    title: "Update contact",
+    description: "Update an existing contact in sevdesk. Only the given fields are changed.",
+    access: "write",
+    idempotent: true,
     inputSchema: z.object({
-      contactId: z.number().describe("The ID of the contact to update"),
+      contactId: z.number().int().describe("The ID of the contact to update"),
       name: z.string().optional().describe("The name of the contact"),
-      surename: z.string().optional().describe("The surname"),
+      surename: z.string().optional().describe("The first name"),
       familyname: z.string().optional().describe("The family name"),
       customerNumber: z.string().optional().describe("Customer number"),
       description: z.string().optional().describe("Description"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      contactId: number;
-      name?: string;
-      surename?: string;
-      familyname?: string;
-      customerNumber?: string;
-      description?: string;
-    }) => {
-      const { contactId, ...updateData } = params;
-      const { data, error } = await client.PUT("/Contact/{contactId}", {
-        params: {
-          path: { contactId },
-        },
-        body: updateData as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, { contactId, ...fields }) =>
+      payload(unwrap(await client.PUT("/Contact/{contactId}", { params: { path: { contactId } }, body: fields as never }))),
+  }),
 
-  delete_contact: {
-    description: "Delete a contact from sevdesk",
+  delete_contact: defineTool({
+    title: "Delete contact",
+    description: "Delete a contact from sevdesk. Fails if documents still reference the contact. Cannot be undone.",
+    access: "destructive",
+    idempotent: true,
     inputSchema: z.object({
-      contactId: z.number().describe("The ID of the contact to delete"),
+      contactId: z.number().int().describe("The ID of the contact to delete"),
     }),
-    handler: async (client: SevdeskClient, params: { contactId: number }) => {
-      const { data, error } = await client.DELETE("/Contact/{contactId}", {
-        params: {
-          path: { contactId: params.contactId },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data ?? { success: true };
+    handler: async (client, params) => {
+      unwrap(await client.DELETE("/Contact/{contactId}", { params: { path: { contactId: params.contactId } } }));
+      return { success: true, deletedContactId: params.contactId };
     },
-  },
+  }),
 };
+

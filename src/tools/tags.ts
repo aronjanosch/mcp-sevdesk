@@ -1,118 +1,90 @@
 import { z } from "zod";
-import type { SevdeskClient } from "../client.js";
+import { unwrap } from "../lib/errors.js";
+import { payload } from "../lib/format.js";
+import { fetchPage, paginationShape } from "../lib/pagination.js";
+import { defineTool } from "../lib/tool.js";
 
 export const tagTools = {
-  list_tags: {
-    description: "List all tags from sevdesk",
+  list_tags: defineTool({
+    title: "List tags",
+    description: "List tags from sevdesk",
+    access: "read",
     inputSchema: z.object({
-      id: z.number().optional().describe("Filter by tag ID"),
+      id: z.number().int().optional().describe("Filter by tag ID"),
       name: z.string().optional().describe("Filter by tag name"),
+      ...paginationShape,
     }),
-    handler: async (client: SevdeskClient, params: {
-      id?: number;
-      name?: string;
-    }) => {
-      const { data, error } = await client.GET("/Tag", {
-        params: {
-          query: {
-            id: params.id,
-            name: params.name,
-          } as any,
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: (client, params) =>
+      fetchPage(params, async (limit, offset) =>
+        unwrap(await client.GET("/Tag", { params: { query: { id: params.id, name: params.name, limit, offset } as never } }))
+      ),
+  }),
 
-  get_tag: {
+  get_tag: defineTool({
+    title: "Get tag",
     description: "Get a specific tag by ID",
-    inputSchema: z.object({
-      tagId: z.number().describe("The ID of the tag to retrieve"),
-    }),
-    handler: async (client: SevdeskClient, params: { tagId: number }) => {
-      const { data, error } = await client.GET("/Tag/{tagId}", {
-        params: {
-          path: { tagId: params.tagId },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    access: "read",
+    inputSchema: z.object({ tagId: z.number().int().describe("The ID of the tag to retrieve") }),
+    handler: async (client, params) =>
+      payload(unwrap(await client.GET("/Tag/{tagId}", { params: { path: { tagId: params.tagId } } }))),
+  }),
 
-  create_tag: {
+  create_tag: defineTool({
+    title: "Create tag",
     description: "Create a new tag and attach it to a document (Invoice, Voucher, Order, or CreditNote)",
+    access: "write",
     inputSchema: z.object({
       name: z.string().describe("Name of the tag"),
-      objectId: z.number().describe("ID of the document to tag"),
+      objectId: z.number().int().describe("ID of the document to tag"),
       objectName: z.enum(["Invoice", "Voucher", "Order", "CreditNote"]).describe("Type of document to tag"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      name: string;
-      objectId: number;
-      objectName: "Invoice" | "Voucher" | "Order" | "CreditNote";
-    }) => {
-      const { data, error } = await client.POST("/Tag/Factory/create", {
-        body: {
-          name: params.name,
-          object: {
-            id: params.objectId,
-            objectName: params.objectName,
-          },
-        } as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.POST("/Tag/Factory/create", {
+            body: { name: params.name, object: { id: params.objectId, objectName: params.objectName } } as never,
+          })
+        )
+      ),
+  }),
 
-  update_tag: {
+  update_tag: defineTool({
+    title: "Rename tag",
     description: "Update an existing tag's name",
+    access: "write",
+    idempotent: true,
     inputSchema: z.object({
-      tagId: z.number().describe("The ID of the tag to update"),
+      tagId: z.number().int().describe("The ID of the tag to update"),
       name: z.string().describe("New name for the tag"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      tagId: number;
-      name: string;
-    }) => {
-      const { data, error } = await client.PUT("/Tag/{tagId}", {
-        params: {
-          path: { tagId: params.tagId },
-        },
-        body: {
-          name: params.name,
-        } as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.PUT("/Tag/{tagId}", { params: { path: { tagId: params.tagId } }, body: { name: params.name } as never })
+        )
+      ),
+  }),
 
-  delete_tag: {
-    description: "Delete a tag from sevdesk",
-    inputSchema: z.object({
-      tagId: z.number().describe("The ID of the tag to delete"),
-    }),
-    handler: async (client: SevdeskClient, params: { tagId: number }) => {
-      const { data, error } = await client.DELETE("/Tag/{tagId}", {
-        params: {
-          path: { tagId: params.tagId },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data ?? { success: true };
+  delete_tag: defineTool({
+    title: "Delete tag",
+    description: "Delete a tag from sevdesk. Cannot be undone.",
+    access: "destructive",
+    idempotent: true,
+    inputSchema: z.object({ tagId: z.number().int().describe("The ID of the tag to delete") }),
+    handler: async (client, params) => {
+      unwrap(await client.DELETE("/Tag/{tagId}", { params: { path: { tagId: params.tagId } } }));
+      return { success: true, deletedTagId: params.tagId };
     },
-  },
+  }),
 
-  list_tag_relations: {
-    description: "List all tag relations (shows which documents have which tags)",
-    inputSchema: z.object({}),
-    handler: async (client: SevdeskClient, _params: {}) => {
-      const { data, error } = await client.GET("/TagRelation", {});
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+  list_tag_relations: defineTool({
+    title: "List tag relations",
+    description: "List tag relations (shows which documents have which tags)",
+    access: "read",
+    inputSchema: z.object({ ...paginationShape }),
+    handler: (client, params) =>
+      fetchPage(params, async (limit, offset) =>
+        unwrap(await client.GET("/TagRelation", { params: { query: { limit, offset } as never } }))
+      ),
+  }),
 };

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { SevdeskClient } from "../client.js";
+import { bookingShape, buildBookingBody } from "../lib/booking.js";
+import { toUnixTimestamp } from "../lib/dates.js";
+import { unwrap } from "../lib/errors.js";
+import { payload } from "../lib/format.js";
+import { fetchPage, paginationShape } from "../lib/pagination.js";
+import { defineTool } from "../lib/tool.js";
 import type { components } from "../generated/sevdesk-api.js";
 
 /**
@@ -64,7 +69,7 @@ const voucherPositionSchema = z.object({
     .number()
     .optional()
     .describe(
-      "ID of the AccountingType (Buchungskonto) for sevdesk-Update 1.0. Use get_receipt_guidance_for_expense / get_receipt_guidance_for_revenue to find a valid ID. Either accountingTypeId or accountDatevId is required."
+      "ID of the AccountingType (Buchungskonto) for sevdesk-Update 1.0. Use get_receipt_guidance (scope expense/revenue) to find a valid ID. Either accountingTypeId or accountDatevId is required."
     ),
   accountDatevId: z
     .number()
@@ -104,7 +109,7 @@ export function buildPositions(positions: VoucherPositionInput[]): VoucherPosPay
   return positions.map((position, index) => {
     if (!position.accountingTypeId && !position.accountDatevId) {
       throw new Error(
-        `Position ${index}: either accountingTypeId or accountDatevId is required. Use get_receipt_guidance_for_expense or get_receipt_guidance_for_revenue to look up a valid booking account.`
+        `Position ${index}: either accountingTypeId or accountDatevId is required. Use get_receipt_guidance to look up a valid booking account.`
       );
     }
 
@@ -239,141 +244,98 @@ export function buildSaveVoucherPayload(
 }
 
 export const voucherTools = {
-  list_vouchers: {
-    description: "List all vouchers (receipts/expenses) from sevdesk",
+  list_vouchers: defineTool({
+    title: "List vouchers",
+    description: "List vouchers (receipts/expenses) from sevdesk. Returns one page; use nextOffset to continue.",
+    access: "read",
     inputSchema: z.object({
       status: z.enum(["50", "100", "1000"]).optional().describe("Voucher status: 50=Draft, 100=Unpaid, 1000=Paid"),
       creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit (income), D=Debit (expense)"),
-      descriptionLike: z.string().optional().describe("Filter by description (partial match)"),
-      startDate: z.string().optional().describe("Filter by start date (Unix timestamp)"),
-      endDate: z.string().optional().describe("Filter by end date (Unix timestamp)"),
-      limit: z.number().optional().describe("Limit the number of results"),
-      offset: z.number().optional().describe("Skip a number of results"),
+      descriptionLike: z.string().optional().describe("Filter by description / voucher number (partial match)"),
+      contactId: z.number().int().optional().describe("Only vouchers of this contact (supplier)"),
+      startDate: z.string().optional().describe("Vouchers from this date on: YYYY-MM-DD, DD.MM.YYYY or Unix timestamp"),
+      endDate: z.string().optional().describe("Vouchers up to and including this date"),
+      ...paginationShape,
     }),
-    handler: async (client: SevdeskClient, params: {
-      status?: "50" | "100" | "1000";
-      creditDebit?: "C" | "D";
-      descriptionLike?: string;
-      startDate?: string;
-      endDate?: string;
-      limit?: number;
-      offset?: number;
-    }) => {
-      const { data, error } = await client.GET("/Voucher", {
-        params: {
-          query: {
-            status: params.status ? Number(params.status) : undefined,
-            creditDebit: params.creditDebit,
-            descriptionLike: params.descriptionLike,
-            startDate: params.startDate ? Number(params.startDate) : undefined,
-            endDate: params.endDate ? Number(params.endDate) : undefined,
-            limit: params.limit,
-            offset: params.offset,
-          } as any,
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: (client, params) =>
+      fetchPage(params, async (limit, offset) =>
+        unwrap(
+          await client.GET("/Voucher", {
+            params: {
+              query: {
+                status: params.status ? Number(params.status) : undefined,
+                creditDebit: params.creditDebit,
+                descriptionLike: params.descriptionLike,
+                "contact[id]": params.contactId,
+                "contact[objectName]": params.contactId ? "Contact" : undefined,
+                startDate: params.startDate ? toUnixTimestamp(params.startDate) : undefined,
+                endDate: params.endDate ? toUnixTimestamp(params.endDate, { endOfDay: true }) : undefined,
+                limit,
+                offset,
+              } as never,
+            },
+          })
+        )
+      ),
+  }),
 
-  get_voucher: {
+  get_voucher: defineTool({
+    title: "Get voucher",
     description: "Get a specific voucher by ID from sevdesk",
-    inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher to retrieve"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await client.GET("/Voucher/{voucherId}", {
-        params: {
-          path: { voucherId: params.voucherId },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    access: "read",
+    inputSchema: z.object({ voucherId: z.number().int().describe("The ID of the voucher to retrieve") }),
+    handler: async (client, params) =>
+      payload(unwrap(await client.GET("/Voucher/{voucherId}", { params: { path: { voucherId: params.voucherId } } }))),
+  }),
 
-  book_voucher: {
-    description: "Book a voucher (mark it as paid)",
+  book_voucher: defineTool({
+    title: "Book voucher payment",
+    description:
+      "Book a payment on a voucher (marks it as paid). Pass checkAccountTransactionId to link an existing bank transaction to the voucher (payment matching). Undo with reset_voucher_to_open.",
+    access: "write",
     inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher to book"),
-      amount: z.number().describe("Amount to book"),
-      date: z.string().describe("Booking date (Unix timestamp)"),
-      type: z.enum(["N", "CB", "CF", "O", "OF", "MF", "C"]).describe("Booking type: N=Normal, CB=Cash discount, etc."),
-      checkAccountId: z.number().describe("ID of the check account"),
-      checkAccountTransactionId: z.number().optional().describe("ID of an existing transaction to link"),
-      createFeed: z.boolean().optional().describe("Create a feed entry"),
+      voucherId: z.number().int().describe("The ID of the voucher to book"),
+      ...bookingShape,
     }),
-    handler: async (client: SevdeskClient, params: {
-      voucherId: number;
-      amount: number;
-      date: string;
-      type: "N" | "CB" | "CF" | "O" | "OF" | "MF" | "C";
-      checkAccountId: number;
-      checkAccountTransactionId?: number;
-      createFeed?: boolean;
-    }) => {
-      const { data, error } = await client.PUT("/Voucher/{voucherId}/bookAmount", {
-        params: {
-          path: { voucherId: params.voucherId },
-        },
-        body: {
-          amount: params.amount,
-          date: params.date,
-          type: params.type,
-          checkAccount: {
-            id: params.checkAccountId,
-            objectName: "CheckAccount",
-          },
-          checkAccountTransaction: params.checkAccountTransactionId
-            ? {
-                id: params.checkAccountTransactionId,
-                objectName: "CheckAccountTransaction",
-              }
-            : undefined,
-          createFeed: params.createFeed,
-        } as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, { voucherId, ...booking }) =>
+      payload(
+        unwrap(
+          await client.PUT("/Voucher/{voucherId}/bookAmount", {
+            params: { path: { voucherId } },
+            body: buildBookingBody(booking) as never,
+          })
+        )
+      ),
+  }),
 
-  get_voucher_positions: {
+  get_voucher_positions: defineTool({
+    title: "Get voucher positions",
     description: "Get all positions (line items) of a voucher",
-    inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await client.GET("/VoucherPos", {
-        params: {
-          query: {
-            "voucher[id]": params.voucherId,
-            "voucher[objectName]": "Voucher",
-          } as any,
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    access: "read",
+    inputSchema: z.object({ voucherId: z.number().int().describe("The ID of the voucher"), ...paginationShape }),
+    handler: ({ GET }, { voucherId, ...page }) =>
+      fetchPage(page, async (limit, offset) =>
+        unwrap(
+          await GET("/VoucherPos", {
+            params: {
+              query: { "voucher[id]": voucherId, "voucher[objectName]": "Voucher", limit, offset } as never,
+            },
+          })
+        )
+      ),
+  }),
 
-  upload_voucher_file: {
+  upload_voucher_file: defineTool({
+    title: "Upload voucher document",
     description:
       "Upload a receipt document (PDF/image) to sevdesk. This does NOT create a voucher: it stores the file temporarily and returns an internal filename, which you then pass to create_voucher as 'filename' to attach the document.",
+    access: "write",
     inputSchema: z.object({
       fileName: z.string().describe("Name of the file, e.g. receipt.pdf"),
       base64Content: z.string().describe("Base64 encoded file content (a data: URI prefix is accepted too)"),
-      mimeType: z
-        .string()
-        .optional()
-        .describe("MIME type of the file, e.g. application/pdf or image/jpeg"),
+      mimeType: z.string().optional().describe("MIME type of the file, e.g. application/pdf or image/jpeg"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      fileName: string;
-      base64Content: string;
-      mimeType?: string;
-    }) => {
+    handler: async (client, params) => {
       // Accept both a bare base64 string and a full data: URI
       const base64 = params.base64Content.replace(/^data:[^;]*;base64,/, "");
       const bytes = Buffer.from(base64, "base64");
@@ -391,21 +353,25 @@ export const voucherTools = {
         params.fileName
       );
 
-      const { data, error } = await client.POST("/Voucher/Factory/uploadTempFile", {
-        // openapi-typescript models the non-standard "form-data" content entry of this
-        // endpoint as an untyped body, so the FormData has to be passed through untyped.
-        body: form as never,
-        bodySerializer: (body: unknown) => body as FormData,
-        headers: { "Content-Type": null },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
+      return payload(
+        unwrap(
+          await client.POST("/Voucher/Factory/uploadTempFile", {
+            // openapi-typescript models the non-standard "form-data" content entry of this
+            // endpoint as an untyped body, so the FormData has to be passed through untyped.
+            body: form as never,
+            bodySerializer: (body: unknown) => body as FormData,
+            headers: { "Content-Type": null },
+          })
+        )
+      );
     },
-  },
+  }),
 
-  create_voucher: {
+  create_voucher: defineTool({
+    title: "Create voucher",
     description:
-      "Create a new voucher (Beleg) with its positions in sevdesk. Use upload_voucher_file first if you want to attach the receipt document. Look up the booking account for each position with get_receipt_guidance_for_expense or get_receipt_guidance_for_revenue.",
+      "Create a new voucher (Beleg) with its positions in sevdesk. Use upload_voucher_file first if you want to attach the receipt document. Look up the booking account for each position with get_receipt_guidance (scope expense or revenue).",
+    access: "write",
     inputSchema: z.object({
       ...voucherBaseSchema,
       status: z
@@ -413,61 +379,65 @@ export const voucherTools = {
         .optional()
         .describe("50=Draft, 100=Open/unpaid (default). Only these two are valid on creation."),
     }),
-    handler: async (client: SevdeskClient, params: VoucherBaseInput & { status?: "50" | "100" }) => {
-      const { data, error } = await client.POST("/Voucher/Factory/saveVoucher", {
-        body: asGeneratedPayload(buildSaveVoucherPayload({ ...params, status: params.status ?? "100" })),
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.POST("/Voucher/Factory/saveVoucher", {
+            body: asGeneratedPayload(buildSaveVoucherPayload({ ...params, status: params.status ?? "100" })),
+          })
+        )
+      ),
+  }),
 
-  update_voucher: {
+  update_voucher: defineTool({
+    title: "Update voucher",
     description:
       "Update an existing voucher and replace its positions. sevdesk only allows updating vouchers in draft status (50) - call reset_voucher_to_draft first if the voucher is already open or paid.",
+    access: "write",
+    idempotent: true,
     inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher to update"),
+      voucherId: z.number().int().describe("The ID of the voucher to update"),
       ...voucherBaseSchema,
       status: z.enum(["50", "100"]).optional().describe("50=Draft (default), 100=Open/unpaid"),
     }),
-    handler: async (
-      client: SevdeskClient,
-      params: VoucherBaseInput & { voucherId: number; status?: "50" | "100" }
-    ) => {
-      const { data, error } = await client.POST("/Voucher/Factory/saveVoucher", {
-        body: asGeneratedPayload(buildSaveVoucherPayload({ ...params, status: params.status ?? "50" })),
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.POST("/Voucher/Factory/saveVoucher", {
+            body: asGeneratedPayload(buildSaveVoucherPayload({ ...params, status: params.status ?? "50" })),
+          })
+        )
+      ),
+  }),
 
-  reset_voucher_to_draft: {
-    description:
-      "Reset an open voucher back to draft status (50) so that it can be edited with update_voucher",
-    inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher to reset"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await client.PUT("/Voucher/{voucherId}/resetToDraft", {
-        params: { path: { voucherId: params.voucherId } },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+  reset_voucher_to_draft: defineTool({
+    title: "Reset voucher to draft",
+    description: "Reset an open voucher back to draft status (50) so that it can be edited with update_voucher",
+    access: "write",
+    idempotent: true,
+    inputSchema: z.object({ voucherId: z.number().int().describe("The ID of the voucher to reset") }),
+    handler: async (client, params) =>
+      payload(unwrap(await client.PUT("/Voucher/{voucherId}/resetToDraft", { params: { path: { voucherId: params.voucherId } } }))),
+  }),
 
-  reset_voucher_to_open: {
+  reset_voucher_to_open: defineTool({
+    title: "Reset voucher to open",
     description: "Reset a paid voucher back to open/unpaid status (100), undoing its booking",
-    inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher to reset"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await client.PUT("/Voucher/{voucherId}/resetToOpen", {
-        params: { path: { voucherId: params.voucherId } },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
-  },
+    access: "write",
+    idempotent: true,
+    inputSchema: z.object({ voucherId: z.number().int().describe("The ID of the voucher to reset") }),
+    handler: async (client, params) =>
+      payload(unwrap(await client.PUT("/Voucher/{voucherId}/resetToOpen", { params: { path: { voucherId: params.voucherId } } }))),
+  }),
+
+  enshrine_voucher: defineTool({
+    title: "Enshrine voucher",
+    description:
+      "Enshrine (festschreiben) a voucher. Enshrined vouchers can never be changed or reset again. Only possible once the voucher is open or paid. Cannot be undone.",
+    access: "destructive",
+    idempotent: true,
+    inputSchema: z.object({ voucherId: z.number().int().describe("The ID of the voucher to enshrine") }),
+    handler: async (client, params) =>
+      unwrap(await client.PUT("/Voucher/{voucherId}/enshrine", { params: { path: { voucherId: params.voucherId } } })),
+  }),
 };

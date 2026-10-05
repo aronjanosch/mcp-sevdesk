@@ -5,9 +5,11 @@ Ein MCP (Model Context Protocol) Server für die sevdesk API. Ermöglicht die In
 ## Features
 
 - **Kontakte**: Erstellen, lesen, aktualisieren und löschen von Kontakten (Kunden, Lieferanten, Partner)
-- **Rechnungen**: Auflisten, abrufen, als PDF exportieren, per E-Mail versenden, buchen und stornieren
+- **Rechnungen**: Anlegen, auflisten, abrufen, als PDF speichern, per E-Mail versenden, buchen (inkl. Zahlungsabgleich mit Bank-Transaktionen), festschreiben und stornieren
+- **Angebote und Gutschriften**: Lesender Zugriff
 - **Belege (Voucher)**: Anlegen, bearbeiten und buchen von Eingangsrechnungen und Ausgaben, inkl. Dokument-Upload und Buchungskonto-Ermittlung
-- **Bankkonten**: Verwalten von Bankkonten und Transaktionen
+- **Bankkonten**: Bankkonten, Kontostände und Transaktionen verwalten
+- **Read-only-Modus**: Optional nur lesende Tools exponieren
 - **Artikel**: Verwalten von Produkten und Dienstleistungen
 
 ## Installation
@@ -48,6 +50,20 @@ Füge den Server zu deiner Claude Desktop Konfiguration hinzu (`~/.config/claude
 }
 ```
 
+### Read-only-Modus
+
+Für reine Auswertungen und Recherche lässt sich der Server so starten, dass er **nur lesende Tools**
+registriert. Alles, was Daten anlegen, ändern, löschen, versenden oder festschreiben könnte, ist
+dann für den Client gar nicht sichtbar:
+
+```bash
+SEVDESK_READONLY=1 npm start      # oder: node dist/index.js --read-only
+```
+
+In der Claude-Desktop-Konfiguration also `"env": { "SEVDESK_API_TOKEN": "...", "SEVDESK_READONLY": "1" }`
+setzen oder `"--read-only"` zu `args` hinzufügen. Ein zusätzlich eingeschränkter API-Token in sevdesk
+bleibt die sicherste Variante, der Modus ist die zweite Schutzschicht.
+
 ### Direkt ausführen
 
 ```bash
@@ -56,55 +72,69 @@ SEVDESK_API_TOKEN="dein-token" npm start
 
 ## Verfügbare Tools
 
+Jedes Tool trägt MCP-Annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), damit
+Clients gezielt vor Löschen, Stornieren, Festschreiben und Versenden nachfragen können.
+**R** = lesend, **W** = schreibend (korrigierbar), **D** = destruktiv (nicht rückgängig zu machen).
+
 ### Kontakte
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_contacts` | Alle Kontakte auflisten |
-| `get_contact` | Einzelnen Kontakt abrufen |
-| `create_contact` | Neuen Kontakt erstellen |
-| `update_contact` | Kontakt aktualisieren |
-| `delete_contact` | Kontakt löschen |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_contacts` | R | Kontakte auflisten |
+| `get_contact` | R | Einzelnen Kontakt abrufen |
+| `get_next_customer_number` | R | Nächste freie Kundennummer |
+| `create_contact` | W | Neuen Kontakt erstellen |
+| `update_contact` | W | Kontakt aktualisieren |
+| `delete_contact` | D | Kontakt löschen |
 
 ### Rechnungen
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_invoices` | Alle Rechnungen auflisten |
-| `get_invoice` | Einzelne Rechnung abrufen |
-| `get_invoice_pdf` | Rechnung als PDF abrufen |
-| `send_invoice_by_email` | Rechnung per E-Mail versenden |
-| `mark_invoice_as_sent` | Rechnung als versendet markieren |
-| `book_invoice` | Rechnung als bezahlt buchen |
-| `cancel_invoice` | Rechnung stornieren |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_invoices` | R | Rechnungen auflisten (Status, Zeitraum, Kontakt) |
+| `get_invoice` | R | Einzelne Rechnung abrufen |
+| `get_invoice_pdf` | R | PDF abrufen, mit `outputPath` direkt als Datei speichern |
+| `get_invoice_positions` | R | Positionen einer Rechnung |
+| `get_positions_by_part` | R | Alle Verkäufe eines Artikels |
+| `list_invoice_positions_for_timeframe` | R | Umsatz je Produkt in einem Zeitraum |
+| `create_invoice` | W | Rechnung mit Positionen anlegen (Standard: Entwurf) |
+| `mark_invoice_as_sent` | W | Rechnung als versendet markieren |
+| `book_invoice` | W | Zahlung buchen, optional mit Bank-Transaktion verknüpfen |
+| `reset_invoice_to_draft` / `reset_invoice_to_open` | W | Status zurücksetzen |
+| `send_invoice_by_email` | D | Rechnung per E-Mail versenden |
+| `cancel_invoice` | D | Rechnung stornieren (erzeugt Stornorechnung) |
+| `enshrine_invoice` | D | Rechnung festschreiben |
+
+### Angebote/Aufträge und Gutschriften
+
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_orders`, `get_order`, `get_order_positions` | R | Angebote und Aufträge |
+| `list_credit_notes`, `get_credit_note`, `get_credit_note_positions` | R | Gutschriften |
 
 ### Belege (Voucher)
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_vouchers` | Alle Belege auflisten |
-| `get_voucher` | Einzelnen Beleg abrufen |
-| `create_voucher` | Neuen Beleg mit Positionen anlegen |
-| `update_voucher` | Beleg im Entwurfsstatus aktualisieren |
-| `book_voucher` | Beleg als bezahlt buchen |
-| `get_voucher_positions` | Belegpositionen abrufen |
-| `upload_voucher_file` | Belegdatei hochladen (liefert den internen Dateinamen) |
-| `reset_voucher_to_draft` | Beleg zurück auf Entwurf setzen (zum Bearbeiten) |
-| `reset_voucher_to_open` | Bezahlten Beleg zurück auf offen setzen |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_vouchers` | R | Belege auflisten (Status, Zeitraum, Lieferant, Beschreibung) |
+| `get_voucher` | R | Einzelnen Beleg abrufen |
+| `get_voucher_positions` | R | Belegpositionen abrufen |
+| `upload_voucher_file` | W | Belegdatei hochladen (liefert den internen Dateinamen) |
+| `create_voucher` | W | Neuen Beleg mit Positionen anlegen |
+| `update_voucher` | W | Beleg im Entwurfsstatus aktualisieren |
+| `book_voucher` | W | Zahlung buchen, optional mit Bank-Transaktion verknüpfen |
+| `reset_voucher_to_draft` / `reset_voucher_to_open` | W | Status zurücksetzen |
+| `enshrine_voucher` | D | Beleg festschreiben |
 
 ### Buchungskonten (Receipt Guidance)
 
-Belegpositionen brauchen ein Buchungskonto. Diese Tools liefern die gültigen Konten
-inklusive der erlaubten Steuersätze — ohne sie müsste das Modell Kontonummern raten.
+Belegpositionen brauchen ein Buchungskonto. Dieses Tool liefert die gültigen Konten
+inklusive der erlaubten Steuersätze — ohne es müsste das Modell Kontonummern raten.
 
-| Tool | Beschreibung |
-|------|-------------|
-| `get_receipt_guidance_for_expense` | Buchungskonten für Ausgaben (creditDebit=D) |
-| `get_receipt_guidance_for_revenue` | Buchungskonten für Einnahmen (creditDebit=C) |
-| `list_receipt_guidance_accounts` | Alle Buchungskonten |
-| `get_receipt_guidance_by_account_number` | Info zu einer DATEV-Kontonummer |
-| `get_receipt_guidance_by_tax_rule` | Konten zu einer Steuerregel, z. B. `USTPFL_UMS_EINN` |
-| `get_bookkeeping_system_version` | Version des Buchhaltungssystems (1.0 vs. 2.0) |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `get_receipt_guidance` | R | `scope`: `expense`, `revenue`, `all`, `account_number`, `tax_rule`; mit `search` filterbar |
+| `get_bookkeeping_system_version` | R | Version des Buchhaltungssystems (1.0 vs. 2.0) |
 
 ### Belege anlegen
 
@@ -114,7 +144,7 @@ Ein Beleg entsteht in zwei Schritten, weil sevdesk die Datei getrennt vom Beleg 
 2. `create_voucher` legt den Beleg an und hängt die Datei über `filename` an.
 
 Das Buchungskonto (`accountingTypeId` für sevdesk-Update 1.0, `accountDatevId` für 2.0)
-kommt aus den Receipt-Guidance-Tools. Pro Position wird nur **ein** Betrag angegeben:
+kommt aus den Receipt-Guidance (`get_receipt_guidance`). Pro Position wird nur **ein** Betrag angegeben:
 `sum` gilt per Default als Bruttobetrag, mit `net: true` als Nettobetrag — der jeweils
 andere Wert wird aus `taxRate` berechnet, damit Netto und Brutto nicht auseinanderlaufen
 können.
@@ -140,24 +170,33 @@ bezahlten Beleg also zuerst `reset_voucher_to_draft` bzw. `reset_voucher_to_open
 
 ### Bankkonten
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_check_accounts` | Alle Bankkonten auflisten |
-| `get_check_account` | Einzelnes Bankkonto abrufen |
-| `get_check_account_balance` | Kontostand abrufen |
-| `list_transactions` | Transaktionen auflisten |
-| `get_transaction` | Einzelne Transaktion abrufen |
-| `create_transaction` | Neue Transaktion erstellen |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_check_accounts`, `get_check_account`, `get_check_account_balance` | R | Bankkonten und Kontostand |
+| `list_transactions`, `get_transaction` | R | Transaktionen (inkl. Filter `isBooked`) |
+| `create_transaction`, `update_transaction` | W | Transaktion anlegen/ändern |
+| `delete_transaction`, `enshrine_transaction` | D | Transaktion löschen/festschreiben |
 
-### Artikel
+### Artikel und Tags
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_parts` | Alle Artikel auflisten |
-| `get_part` | Einzelnen Artikel abrufen |
-| `create_part` | Neuen Artikel erstellen |
-| `update_part` | Artikel aktualisieren |
-| `get_part_stock` | Lagerbestand abrufen |
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `list_parts`, `get_part`, `get_part_stock` | R | Artikel und Lagerbestand |
+| `create_part`, `update_part` | W | Artikel anlegen/ändern |
+| `list_tags`, `get_tag`, `list_tag_relations` | R | Tags |
+| `create_tag`, `update_tag` | W | Tag anlegen/umbenennen |
+| `delete_tag` | D | Tag löschen |
+
+## Verhalten der Tools
+
+- **Pagination**: Listen-Tools liefern standardmäßig 50 Einträge (max. 500) und geben
+  `hasMore` sowie `nextOffset` zurück. Mit `fields` lassen sich die Felder je Eintrag einschränken.
+- **Datumsangaben**: Filter und Buchungsdaten akzeptieren `YYYY-MM-DD`, `DD.MM.YYYY` oder einen
+  Unix-Timestamp. Reine Datumsangaben gelten in Europe/Berlin, ein `endDate` schließt den ganzen Tag ein.
+- **Kompakte Antworten**: Leere Felder (`null`, `""`, `[]`) werden entfernt, das JSON ist nicht eingerückt.
+- **Fehler**: API-Fehler kommen als lesbare Meldung mit HTTP-Status zurück. Der Client nutzt ein
+  Timeout (30 s) und wiederholt bei `429` (alle Methoden) sowie bei `5xx`/Netzwerkfehlern (nur `GET`)
+  mit exponentiellem Backoff.
 
 ## API-Referenz
 
