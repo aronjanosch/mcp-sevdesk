@@ -198,26 +198,89 @@ describe("Tools gegen simulierte API", () => {
     expect(JSON.parse(textOf(result))).toEqual({ count: 1, objects: [{ id: 1, name: "Software Lizenzen" }] });
   });
 
-  it("list_invoice_positions_for_timeframe aggregiert und meldet fehlgeschlagene Rechnungen", async () => {
-    const { client } = await connect((req) => {
-      if (req.url.pathname.endsWith("/Invoice")) return json({ objects: [{ id: "1" }, { id: "2" }] });
-      if (req.url.pathname.includes("/Invoice/1/")) {
-        return json({ objects: [{ name: "Beratung", quantity: "2", sumNetAccounting: "200", sumGrossAccounting: "238" }] });
+  describe("list_invoice_positions_for_timeframe", () => {
+    const position = (name: string, partId: string | null, gross: string) => ({
+      name,
+      part: partId ? { id: partId } : null,
+      quantity: "1",
+      sumNetAccounting: String(Number(gross) / 1.19),
+      sumGrossAccounting: gross,
+    });
+
+    /** Erfundene Rechnungen: 1 mit Versandzuschlag, 2 mit Rabatt, 3 ohne Abweichung, 4 offen. */
+    const fixtures: Record<string, { header: Record<string, string>; positions: any[] }> = {
+      "1": { header: { id: "1", status: "1000", sumGrossAccounting: "78.98", sumNetAccounting: "66.37" }, positions: [position("Artikel A", "10", "74.99")] },
+      "2": { header: { id: "2", status: "1000", sumGrossAccounting: "60.63", sumNetAccounting: "50.95" }, positions: [position("Artikel A", "10", "40.00"), position("Artikel B", "20", "38.32")] },
+      "3": { header: { id: "3", status: "1000", sumGrossAccounting: "11.90", sumNetAccounting: "10.00" }, positions: [position("Gleicher Name", "30", "11.90")] },
+      "4": { header: { id: "4", status: "200", sumGrossAccounting: "23.80", sumNetAccounting: "20.00" }, positions: [position("Gleicher Name", "40", "23.80")] },
+    };
+
+    const respond = (failing: string[] = [], seen: string[] = []) => (req: any) => {
+      if (req.url.pathname.endsWith("/Invoice")) {
+        seen.push(req.url.searchParams.get("status") ?? "");
+        const status = req.url.searchParams.get("status");
+        return json({ objects: Object.values(fixtures).map((f) => f.header).filter((h) => h.status === status) });
       }
-      return json({ error: { message: "boom" } }, 400);
+      const id = /Invoice\/(\d+)\//.exec(req.url.pathname)![1];
+      return failing.includes(id) ? json({ error: { message: "boom" } }, 400) : json({ objects: fixtures[id].positions });
+    };
+
+    const run = async (args: Record<string, unknown>, failing: string[] = [], seen: string[] = []) => {
+      const { client } = await connect(respond(failing, seen));
+      return client.callTool({ name: "list_invoice_positions_for_timeframe", arguments: { startDate: "2024-01-01", endDate: "2024-12-31", ...args } });
+    };
+
+    it("gruppiert nach Artikel-ID statt nach Name und zählt eindeutige Rechnungen", async () => {
+      const data = JSON.parse(textOf(await run({ status: "billed" })));
+
+      const gleicheNamen = data.summary.filter((p: any) => p.productName === "Gleicher Name");
+      expect(gleicheNamen).toHaveLength(2);
+      const a = data.summary.find((p: any) => p.partId === "10");
+      expect(a).toMatchObject({ totalGrossRevenue: 114.99, positionCount: 2, invoiceCount: 2 });
     });
 
-    const result = await client.callTool({
-      name: "list_invoice_positions_for_timeframe",
-      arguments: { startDate: "2024-01-01", endDate: "2024-12-31" },
+    it("weist Zuschläge und Rabatte auf Rechnungsebene im Abgleich aus", async () => {
+      const data = JSON.parse(textOf(await run({})));
+
+      // Rechnung 1: +3,99 (Zuschlag); Rechnung 2: 60,63 - 78,32 = -17,69 (Rabatt); Rechnung 3: keine Abweichung
+      expect(data.reconciliation.positionsGross).toBe(165.21);
+      expect(data.totals.invoicedGross).toBe(151.51);
+      expect(data.reconciliation.adjustmentsGross).toBe(-13.7);
+      expect(data.reconciliation.invoicesWithAdjustments).toBe(2);
+      expect(data.reconciliation.adjustedInvoices.map((i: any) => [i.invoiceId, i.adjustmentGross])).toEqual(
+        expect.arrayContaining([[1, 3.99], [2, -17.69]])
+      );
     });
 
-    const data = JSON.parse(textOf(result));
-    expect(data.summary).toEqual([
-      { productName: "Beratung", totalQuantity: 2, totalNetRevenue: 200, totalGrossRevenue: 238, positionCount: 1 },
-    ]);
-    expect(data.failedInvoiceIds).toEqual([2]);
-    expect(data).not.toHaveProperty("positions");
+    it("trennt bezahlt und offen bei status=billed und fragt beide Status ab", async () => {
+      const seen: string[] = [];
+      const data = JSON.parse(textOf(await run({ status: "billed" }, [], seen)));
+
+      expect(seen.sort()).toEqual(["1000", "200"]);
+      expect(data.totals).toMatchObject({ invoicedGross: 175.31, paidGross: 151.51, openGross: 23.8 });
+    });
+
+    it("meldet Abdeckung und fehlgeschlagene Rechnungen", async () => {
+      const data = JSON.parse(textOf(await run({}, ["2"])));
+
+      expect(data.coverage).toEqual({ invoicesFound: 3, invoicesLoaded: 2, complete: false, failedInvoiceIds: [2] });
+      expect(data.warning).toMatch(/incomplete/);
+      expect(data).not.toHaveProperty("positions");
+    });
+
+    it("bricht mit failOnIncomplete bei unvollständigen Daten ab", async () => {
+      const result: any = await run({ failOnIncomplete: true }, ["2"]);
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("failOnIncomplete");
+    });
+
+    it("liefert bei leerem Zeitraum eine vollständige, leere Abdeckung", async () => {
+      const { client } = await connect(() => json({ objects: [] }));
+      const result = await client.callTool({ name: "list_invoice_positions_for_timeframe", arguments: { startDate: "2024-01-01", endDate: "2024-01-31" } });
+
+      expect(JSON.parse(textOf(result)).coverage).toEqual({ invoicesFound: 0, invoicesLoaded: 0, complete: true });
+    });
   });
 
   it("start_datev_export enshrined nie und rechnet den Zeitraum um", async () => {
