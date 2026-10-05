@@ -96,7 +96,7 @@ Clients gezielt vor Löschen, Stornieren, Festschreiben und Versenden nachfragen
 | `get_invoice_pdf` | R | PDF abrufen, mit `outputPath` direkt als Datei speichern |
 | `get_invoice_positions` | R | Positionen einer Rechnung |
 | `get_positions_by_part` | R | Alle Verkäufe eines Artikels |
-| `list_invoice_positions_for_timeframe` | R | Umsatz je Produkt in einem Zeitraum |
+| `list_invoice_positions_for_timeframe` | R | Umsatz je Produkt (nach Artikel-ID) mit Abgleich gegen die Rechnungssummen und Abdeckungsangabe |
 | `create_invoice` | W | Rechnung mit Positionen anlegen (Standard: Entwurf) |
 | `update_invoice` | W | Rechnungsentwurf ändern (Kopf, Kunde, Datum, Positionen ändern/hinzufügen) |
 | `create_invoice_from_order` | W | Rechnung aus Angebot/Auftrag erzeugen (auch Teil-/Abschlagsrechnung) |
@@ -204,6 +204,10 @@ bezahlten Beleg also zuerst `reset_voucher_to_draft` bzw. `reset_voucher_to_open
   `hasMore` sowie `nextOffset` zurück. Mit `fields` lassen sich die Felder je Eintrag einschränken.
 - **Datumsangaben**: Filter und Buchungsdaten akzeptieren `YYYY-MM-DD`, `DD.MM.YYYY` oder einen
   Unix-Timestamp. Reine Datumsangaben gelten in Europe/Berlin, ein `endDate` schließt den ganzen Tag ein.
+- **Umsatzauswertung**: `list_invoice_positions_for_timeframe` summiert Positionen. Zuschläge und Rabatte
+  auf Rechnungsebene (z. B. Versandkosten, Gutscheine) sind keine Positionen und stehen im Block
+  `reconciliation`; `totals` enthält die Rechnungssummen inklusive dieser Posten, getrennt nach bezahlt/offen.
+  `coverage` zeigt, ob alle Rechnungen geladen werden konnten (`failOnIncomplete` bricht sonst ab).
 - **Kompakte Antworten**: Leere Felder (`null`, `""`, `[]`) werden entfernt, das JSON ist nicht eingerückt.
 - **Fehler**: API-Fehler kommen als lesbare Meldung mit HTTP-Status zurück. Der Client nutzt ein
   Timeout (30 s) und wiederholt bei `429` (alle Methoden) sowie bei `5xx`/Netzwerkfehlern (nur `GET`)

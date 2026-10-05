@@ -487,101 +487,189 @@ export const invoiceTools = {
   list_invoice_positions_for_timeframe: defineTool({
     title: "Sales by product in timeframe",
     description:
-      "Fetch all invoice line item positions within a date range and aggregate them by product: total quantity sold, total net and gross revenue. " +
-      "Uses only paid invoices by default so drafts are not counted. Set includePositions=true to also get the raw positions (large).",
+      "Aggregate the invoice line items of a period by product (quantity, net and gross revenue, number of invoices). " +
+      "The result also reconciles the positions with the invoice totals: surcharges and discounts on invoice level (e.g. shipping costs, coupons) are NOT positions, so the product summary can differ from the invoice totals - " +
+      "see `reconciliation`. `coverage` tells whether all invoices could be loaded. " +
+      "status=1000 (default) counts paid invoices only; status=billed counts open and paid invoices (everything invoiced).",
     access: "read",
     inputSchema: z.object({
       startDate: z.string().describe("Start of the timeframe: YYYY-MM-DD, DD.MM.YYYY or Unix timestamp"),
       endDate: z.string().describe("End of the timeframe (inclusive)"),
-      status: z.enum(["100", "200", "1000"]).default("1000").describe("Invoice status: 100=Draft, 200=Open, 1000=Paid (default)"),
-      includePositions: z.boolean().default(false).describe("Also return the raw positions with invoice references"),
+      status: z
+        .enum(["100", "200", "1000", "billed"])
+        .default("1000")
+        .describe("100=Draft, 200=Open, 1000=Paid (default), billed=Open and Paid"),
+      includePositions: z.boolean().default(false).describe("Also return the raw positions with invoice references (large)"),
+      failOnIncomplete: z.boolean().default(false).describe("Fail instead of returning partial results when positions of some invoices cannot be loaded"),
     }),
     handler: async (client, params) => {
+      const num = (value: unknown) => {
+        const parsed = parseFloat(String(value ?? "0"));
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const round = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+
       // Step 1: fetch all invoices in the timeframe (paginate until exhausted)
+      const statuses = params.status === "billed" ? [200, 1000] : [Number(params.status)];
       const invoices: Record<string, any>[] = [];
       const pageSize = 100;
-      for (let offset = 0; ; offset += pageSize) {
-        const page = objectsOf(
-          unwrap(
-            await client.GET("/Invoice", {
-              params: {
-                query: {
-                  status: Number(params.status),
-                  startDate: toUnixTimestamp(params.startDate),
-                  endDate: toUnixTimestamp(params.endDate, { endOfDay: true }),
-                  limit: pageSize,
-                  offset,
-                } as never,
-              },
-            })
-          )
-        );
-        invoices.push(...page);
-        if (page.length < pageSize) break;
+      for (const status of statuses) {
+        for (let offset = 0; ; offset += pageSize) {
+          const page = objectsOf(
+            unwrap(
+              await client.GET("/Invoice", {
+                params: {
+                  query: {
+                    status,
+                    startDate: toUnixTimestamp(params.startDate),
+                    endDate: toUnixTimestamp(params.endDate, { endOfDay: true }),
+                    limit: pageSize,
+                    offset,
+                  } as never,
+                },
+              })
+            )
+          );
+          invoices.push(...page);
+          if (page.length < pageSize) break;
+        }
       }
 
       if (invoices.length === 0) {
-        return { invoiceCount: 0, summary: [], message: "No invoices found for the given timeframe and status." };
+        return {
+          coverage: { invoicesFound: 0, invoicesLoaded: 0, complete: true },
+          summary: [],
+          message: "No invoices found for the given timeframe and status.",
+        };
       }
 
       // Step 2: fetch positions per invoice in small parallel batches to stay friendly to the API
-      const positions: Record<string, any>[] = [];
+      const loaded: { invoice: Record<string, any>; positions: Record<string, any>[] }[] = [];
       const failedInvoiceIds: number[] = [];
       const batchSize = 10;
 
       for (let i = 0; i < invoices.length; i += batchSize) {
-        const results = await Promise.all(
+        await Promise.all(
           invoices.slice(i, i + batchSize).map(async (invoice) => {
             const invoiceId = Number(invoice.id);
             try {
               const data = unwrap(
                 await client.GET("/Invoice/{invoiceId}/getPositions", { params: { path: { invoiceId } } })
               );
-              return objectsOf(data).map((position) => ({
-                ...position,
-                _invoiceId: invoiceId,
-                _invoiceNumber: invoice.invoiceNumber,
-                _invoiceDate: invoice.invoiceDate,
-              }));
+              loaded.push({ invoice, positions: objectsOf(data) });
             } catch {
               failedInvoiceIds.push(invoiceId);
-              return [];
             }
           })
         );
-        positions.push(...results.flat());
       }
 
-      // Step 3: aggregate by product
-      const products = new Map<
-        string,
-        { productName: string; partId: string | null; totalQuantity: number; totalNetRevenue: number; totalGrossRevenue: number; positionCount: number }
-      >();
-
-      for (const position of positions) {
-        const key = position.name ?? position.part?.id ?? "Unknown";
-        const entry =
-          products.get(key) ??
-          { productName: key, partId: position.part?.id ?? null, totalQuantity: 0, totalNetRevenue: 0, totalGrossRevenue: 0, positionCount: 0 };
-        entry.totalQuantity += parseFloat(position.quantity ?? "0");
-        entry.totalNetRevenue += parseFloat(position.sumNetAccounting ?? "0");
-        entry.totalGrossRevenue += parseFloat(position.sumGrossAccounting ?? "0");
-        entry.positionCount += 1;
-        products.set(key, entry);
+      if (failedInvoiceIds.length > 0 && params.failOnIncomplete) {
+        throw new Error(
+          `Positions of ${failedInvoiceIds.length} of ${invoices.length} invoices could not be loaded (ids: ${failedInvoiceIds.join(", ")}). Aborted because failOnIncomplete is set.`
+        );
       }
 
-      const round = (n: number) => Math.round(n * 100) / 100;
+      // Step 3: aggregate by product. The part id is the key; free-text positions fall back to their name.
+      type Product = {
+        productName: string;
+        partId: string | null;
+        totalQuantity: number;
+        totalNetRevenue: number;
+        totalGrossRevenue: number;
+        invoiceIds: Set<string>;
+        positionCount: number;
+      };
+      const products = new Map<string, Product>();
+      const positions: Record<string, any>[] = [];
+      let positionsNet = 0;
+      let positionsGross = 0;
+      let headerNet = 0;
+      let headerGross = 0;
+      let paidGross = 0;
+      const adjustedInvoices: { invoiceId: number; invoiceNumber: unknown; adjustmentGross: number; adjustmentNet: number }[] = [];
+
+      for (const { invoice, positions: invoicePositions } of loaded) {
+        let invoicePositionsNet = 0;
+        let invoicePositionsGross = 0;
+
+        for (const position of invoicePositions) {
+          const partId = position.part?.id ?? null;
+          const key = partId ? `part:${partId}` : `name:${position.name ?? "Unknown"}`;
+          const net = num(position.sumNetAccounting);
+          const gross = num(position.sumGrossAccounting);
+          const entry: Product =
+            products.get(key) ??
+            { productName: position.name ?? "Unknown", partId, totalQuantity: 0, totalNetRevenue: 0, totalGrossRevenue: 0, invoiceIds: new Set(), positionCount: 0 };
+          entry.totalQuantity += num(position.quantity);
+          entry.totalNetRevenue += net;
+          entry.totalGrossRevenue += gross;
+          entry.invoiceIds.add(String(invoice.id));
+          entry.positionCount += 1;
+          products.set(key, entry);
+
+          invoicePositionsNet += net;
+          invoicePositionsGross += gross;
+          if (params.includePositions) {
+            positions.push({ ...position, _invoiceId: Number(invoice.id), _invoiceNumber: invoice.invoiceNumber, _invoiceDate: invoice.invoiceDate });
+          }
+        }
+
+        const invoiceNet = num(invoice.sumNetAccounting ?? invoice.sumNet);
+        const invoiceGross = num(invoice.sumGrossAccounting ?? invoice.sumGross);
+        positionsNet += invoicePositionsNet;
+        positionsGross += invoicePositionsGross;
+        headerNet += invoiceNet;
+        headerGross += invoiceGross;
+        if (String(invoice.status) === "1000") paidGross += invoiceGross;
+
+        if (Math.abs(invoiceGross - invoicePositionsGross) >= 0.005 || Math.abs(invoiceNet - invoicePositionsNet) >= 0.005) {
+          adjustedInvoices.push({
+            invoiceId: Number(invoice.id),
+            invoiceNumber: invoice.invoiceNumber,
+            adjustmentGross: round(invoiceGross - invoicePositionsGross),
+            adjustmentNet: round(invoiceNet - invoicePositionsNet),
+          });
+        }
+      }
+
       const summary = [...products.values()]
-        .map((p) => ({ ...p, totalNetRevenue: round(p.totalNetRevenue), totalGrossRevenue: round(p.totalGrossRevenue) }))
+        .map(({ invoiceIds, ...product }) => ({
+          ...product,
+          totalQuantity: round(product.totalQuantity),
+          totalNetRevenue: round(product.totalNetRevenue),
+          totalGrossRevenue: round(product.totalGrossRevenue),
+          invoiceCount: invoiceIds.size,
+        }))
         .sort((a, b) => b.totalGrossRevenue - a.totalGrossRevenue);
 
       return {
-        invoiceCount: invoices.length,
-        positionCount: positions.length,
-        summary,
+        coverage: {
+          invoicesFound: invoices.length,
+          invoicesLoaded: loaded.length,
+          complete: failedInvoiceIds.length === 0,
+          ...(failedInvoiceIds.length > 0 ? { failedInvoiceIds } : {}),
+        },
         ...(failedInvoiceIds.length > 0
-          ? { warning: "Positions of some invoices could not be loaded; the totals are incomplete.", failedInvoiceIds }
+          ? { warning: "Positions of some invoices could not be loaded; totals and summary are incomplete." }
           : {}),
+        summary,
+        totals: {
+          invoicedGross: round(headerGross),
+          invoicedNet: round(headerNet),
+          paidGross: round(paidGross),
+          openGross: round(headerGross - paidGross),
+        },
+        reconciliation: {
+          positionsGross: round(positionsGross),
+          positionsNet: round(positionsNet),
+          adjustmentsGross: round(headerGross - positionsGross),
+          adjustmentsNet: round(headerNet - positionsNet),
+          invoicesWithAdjustments: adjustedInvoices.length,
+          adjustedInvoices,
+          note:
+            "The product summary only covers line items. adjustments = invoice total minus positions: surcharges (e.g. shipping) are positive, discounts negative. 'totals' are the invoice totals and include them.",
+        },
         ...(params.includePositions ? { positions } : {}),
       };
     },
