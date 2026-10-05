@@ -34,6 +34,21 @@ export const creditNoteTools = {
       ),
   }),
 
+  create_credit_note_from_invoice: defineTool({
+    title: "Create credit note from invoice",
+    description: "Create a credit note (Gutschrift) for an existing invoice, e.g. for a refund. The credit note is created as a draft.",
+    access: "write",
+    inputSchema: z.object({ invoiceId: z.number().int().describe("The ID of the invoice to credit") }),
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.POST("/CreditNote/Factory/createFromInvoice", {
+            body: { invoice: { id: params.invoiceId, objectName: "Invoice" } },
+          })
+        )
+      ),
+  }),
+
   get_credit_note: defineTool({
     title: "Get credit note",
     description: "Get a specific credit note by ID",

@@ -2,6 +2,7 @@ import type { ToolMap } from "../lib/tool.js";
 import { accountTools } from "./accounts.js";
 import { contactTools } from "./contacts.js";
 import { creditNoteTools } from "./credit-notes.js";
+import { exportTools } from "./exports.js";
 import { invoiceTools } from "./invoices.js";
 import { orderTools } from "./orders.js";
 import { partTools } from "./parts.js";
@@ -13,6 +14,7 @@ export {
   accountTools,
   contactTools,
   creditNoteTools,
+  exportTools,
   invoiceTools,
   orderTools,
   partTools,
@@ -26,6 +28,7 @@ export const allTools: ToolMap = {
   ...invoiceTools,
   ...orderTools,
   ...creditNoteTools,
+  ...exportTools,
   ...voucherTools,
   ...receiptGuidanceTools,
   ...accountTools,

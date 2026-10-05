@@ -228,4 +228,50 @@ describe("Tools gegen simulierte API", () => {
     expect(data.failedInvoiceIds).toEqual([2]);
     expect(data).not.toHaveProperty("positions");
   });
+
+  it("start_datev_export enshrined nie und rechnet den Zeitraum um", async () => {
+    const { client, requests } = await connect(() => json({ objects: "job-1" }));
+
+    const result = await client.callTool({
+      name: "start_datev_export",
+      arguments: { startDate: "2024-01-01", endDate: "2024-01-31" },
+    });
+
+    const query = requests[0].url.searchParams;
+    expect(query.get("enshrineDocuments")).toBe("false");
+    expect(query.get("scope")).toBe("EXTCD");
+    expect(query.get("startDate")).toBe("1704063600");
+    expect(query.get("endDate")).toBe("1706741999");
+    expect(JSON.parse(textOf(result)).jobId).toBe("job-1");
+  });
+
+  it("start_datev_export lehnt ungültige scope-Buchstaben ab", async () => {
+    const { client, requests } = await connect(() => json({}));
+
+    const result: any = await client
+      .callTool({ name: "start_datev_export", arguments: { startDate: "2024-01-01", endDate: "2024-01-31", scope: "ABC" } })
+      .catch((e) => e);
+
+    expect(result instanceof Error || result.isError).toBe(true);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("create_invoice_reminder sendet Rechnung als Query und Body", async () => {
+    const { client, requests } = await connect(() => json({ objects: { id: "9" } }));
+
+    await client.callTool({ name: "create_invoice_reminder", arguments: { invoiceId: 4 } });
+
+    expect(requests[0].url.searchParams.get("invoice[id]")).toBe("4");
+    expect(requests[0].body).toEqual({ invoice: { id: 4, objectName: "Invoice" } });
+  });
+
+  it("create_invoice_from_order und create_credit_note_from_invoice bauen die Referenzen", async () => {
+    const { client, requests } = await connect(() => json({ objects: {} }));
+
+    await client.callTool({ name: "create_invoice_from_order", arguments: { orderId: 2, partialType: "AR", type: "percentage", amount: 30 } });
+    await client.callTool({ name: "create_credit_note_from_invoice", arguments: { invoiceId: 4 } });
+
+    expect(requests[0].body).toEqual({ order: { id: 2, objectName: "Order" }, partialType: "AR", type: "percentage", amount: 30 });
+    expect(requests[1].body).toEqual({ invoice: { id: 4, objectName: "Invoice" } });
+  });
 });

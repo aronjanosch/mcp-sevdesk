@@ -164,6 +164,44 @@ export const invoiceTools = {
       payload(unwrap(await client.POST("/Invoice/Factory/saveInvoice", { body: buildSaveInvoicePayload(params) as never }))),
   }),
 
+  create_invoice_from_order: defineTool({
+    title: "Create invoice from order",
+    description:
+      "Create an invoice from an existing order or quote. Without partialType the whole order is invoiced as a final invoice (RE); use TR/AR together with type and amount for partial and advance invoices.",
+    access: "write",
+    inputSchema: z.object({
+      orderId: z.number().int().describe("The ID of the order or quote"),
+      partialType: z.enum(["RE", "TR", "AR"]).optional().describe("RE=final invoice, TR=partial invoice, AR=advance invoice"),
+      type: z.enum(["percentage", "net", "gross"]).optional().describe("How `amount` is interpreted (for partial/advance invoices)"),
+      amount: z.number().optional().describe("Amount or percentage of the partial/advance invoice"),
+    }),
+    handler: async (client, { orderId, ...rest }) =>
+      payload(
+        unwrap(
+          await client.POST("/Invoice/Factory/createInvoiceFromOrder", {
+            body: { order: { id: orderId, objectName: "Order" }, ...rest } as never,
+          })
+        )
+      ),
+  }),
+
+  create_invoice_reminder: defineTool({
+    title: "Create payment reminder",
+    description:
+      "Create a payment reminder (Mahnung) for an overdue invoice. This only creates the reminder document; send it afterwards with send_invoice_by_email using the returned invoice ID.",
+    access: "write",
+    inputSchema: z.object({ invoiceId: z.number().int().describe("The ID of the overdue invoice") }),
+    handler: async (client, params) =>
+      payload(
+        unwrap(
+          await client.POST("/Invoice/Factory/createInvoiceReminder", {
+            params: { query: { "invoice[id]": params.invoiceId, "invoice[objectName]": "Invoice" } },
+            body: { invoice: { id: params.invoiceId, objectName: "Invoice" } } as never,
+          })
+        )
+      ),
+  }),
+
   get_invoice_pdf: defineTool({
     title: "Get invoice PDF",
     description:

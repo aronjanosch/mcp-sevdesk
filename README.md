@@ -98,6 +98,8 @@ Clients gezielt vor Löschen, Stornieren, Festschreiben und Versenden nachfragen
 | `get_positions_by_part` | R | Alle Verkäufe eines Artikels |
 | `list_invoice_positions_for_timeframe` | R | Umsatz je Produkt in einem Zeitraum |
 | `create_invoice` | W | Rechnung mit Positionen anlegen (Standard: Entwurf) |
+| `create_invoice_from_order` | W | Rechnung aus Angebot/Auftrag erzeugen (auch Teil-/Abschlagsrechnung) |
+| `create_invoice_reminder` | W | Mahnung zu einer überfälligen Rechnung erzeugen |
 | `mark_invoice_as_sent` | W | Rechnung als versendet markieren |
 | `book_invoice` | W | Zahlung buchen, optional mit Bank-Transaktion verknüpfen |
 | `reset_invoice_to_draft` / `reset_invoice_to_open` | W | Status zurücksetzen |
@@ -111,6 +113,14 @@ Clients gezielt vor Löschen, Stornieren, Festschreiben und Versenden nachfragen
 |------|---|-------------|
 | `list_orders`, `get_order`, `get_order_positions` | R | Angebote und Aufträge |
 | `list_credit_notes`, `get_credit_note`, `get_credit_note_positions` | R | Gutschriften |
+| `create_credit_note_from_invoice` | W | Gutschrift zu einer Rechnung anlegen |
+
+### Export (DATEV)
+
+| Tool | | Beschreibung |
+|------|---|-------------|
+| `start_datev_export` | W | DATEV-CSV-Export für einen Zeitraum starten (schreibt Belege nicht fest) |
+| `get_export_job_download_info` | R | Download-Link des Exports abrufen (erst verfügbar, wenn der Job fertig ist) |
 
 ### Belege (Voucher)
 
