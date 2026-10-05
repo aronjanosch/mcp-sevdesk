@@ -1,21 +1,12 @@
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
-import { createServer } from "../src/server.js";
 import { allTools } from "../src/tools/index.js";
-import { json, mockClient, type RecordedRequest } from "./helpers.js";
+import { createClientPair } from "./helpers-server.js";
+import { json } from "./helpers.js";
 
-async function connect(responder: (req: RecordedRequest, i: number) => Response | Promise<Response>, readOnly = false) {
-  const { client: api, requests } = mockClient(responder);
-  const server = createServer(api, allTools, { version: "0.0.0-test", readOnly });
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test", version: "0.0.0" });
-  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
-  return { client, requests };
-}
+const connect = createClientPair;
 
 const textOf = (result: any) => result.content[0].text as string;
 

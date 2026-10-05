@@ -28,6 +28,10 @@ const invoicePositionSchema = z.object({
   discount: z.number().optional().describe("Percentage discount on this position"),
 });
 
+const updatePositionSchema = invoicePositionSchema.extend({
+  id: z.number().int().optional().describe("ID of an existing position to change (get_invoice_positions). Without id a new position is added."),
+});
+
 const createInvoiceSchema = z.object({
   contactId: z.number().int().describe("ID of the customer contact (list_contacts)"),
   contactPersonId: z
@@ -112,6 +116,109 @@ export function buildSaveInvoicePayload(params: CreateInvoiceInput) {
     discountSave: null,
     discountDelete: null,
     takeDefaultAddress: true,
+  };
+}
+
+type Existing = Record<string, any>;
+
+/** The id of a nested sevdesk reference, which may arrive as { id } or as a plain value. */
+const refId = (value: any): number | undefined => (value?.id !== undefined ? Number(value.id) : undefined);
+
+const updateInvoiceSchema = z.object({
+  invoiceId: z.number().int().describe("The ID of the invoice to update. It must be a draft (status 100)."),
+  contactId: z.number().int().optional().describe("Change the customer. The address is then taken from the new contact."),
+  contactPersonId: z.number().int().optional(),
+  invoiceDate: z.string().optional().describe("YYYY-MM-DD, DD.MM.YYYY or Unix timestamp"),
+  deliveryDate: z.string().optional(),
+  deliveryDateUntil: z.string().optional(),
+  taxRule: z.enum(["1", "2", "3", "4", "5", "11"]).optional(),
+  taxText: z.string().optional(),
+  currency: z.string().optional(),
+  invoiceType: z.enum(["RE", "AR", "TR", "SR", "ER"]).optional(),
+  status: z.enum(["100", "200"]).optional().describe("Set 200 to turn the draft into an open invoice"),
+  header: z.string().optional(),
+  headText: z.string().optional(),
+  footText: z.string().optional(),
+  timeToPay: z.number().int().optional(),
+  customerInternalNote: z.string().optional(),
+  invoiceNumber: z.string().optional(),
+  positions: z
+    .array(updatePositionSchema)
+    .optional()
+    .describe(
+      "Positions to change or add. A position with `id` replaces that existing position completely, one without `id` is added. Existing positions that are not listed stay unchanged. Removing positions is not supported."
+    ),
+});
+
+type UpdateInvoiceInput = z.infer<typeof updateInvoiceSchema>;
+
+/**
+ * saveInvoice needs the complete invoice model even for a small change, so the current
+ * invoice is read first and only the fields the caller gave are overridden.
+ */
+export function buildUpdateInvoicePayload(existing: Existing, params: UpdateInvoiceInput) {
+  if (String(existing.status) !== "100") {
+    throw new Error(
+      `Invoice ${params.invoiceId} has status ${existing.status}; only drafts (100) can be updated. Use reset_invoice_to_draft first if it is not enshrined.`
+    );
+  }
+
+  const keep = <T,>(override: T | undefined, current: T | undefined) => override ?? current;
+  const invoiceDate = toGermanDate(params.invoiceDate ?? existing.invoiceDate);
+  const deliveryDate = params.deliveryDate ?? existing.deliveryDate;
+  const deliveryDateUntil = params.deliveryDateUntil ?? existing.deliveryDateUntil;
+  const contactChanged = params.contactId !== undefined && params.contactId !== refId(existing.contact);
+
+  const optional = {
+    invoiceNumber: keep(params.invoiceNumber, existing.invoiceNumber),
+    header: keep(params.header, existing.header),
+    headText: keep(params.headText, existing.headText),
+    footText: keep(params.footText, existing.footText),
+    customerInternalNote: keep(params.customerInternalNote, existing.customerInternalNote),
+    timeToPay: keep(params.timeToPay, existing.timeToPay !== undefined && existing.timeToPay !== null ? Number(existing.timeToPay) : undefined),
+    showNet: existing.showNet === undefined ? undefined : existing.showNet === true || existing.showNet === "1" || existing.showNet === "true",
+    ...(contactChanged ? {} : { address: existing.address }),
+  };
+
+  return {
+    invoice: {
+      id: params.invoiceId,
+      objectName: "Invoice" as const,
+      mapAll: true as const,
+      contact: { id: params.contactId ?? refId(existing.contact), objectName: "Contact" as const },
+      contactPerson: { id: params.contactPersonId ?? refId(existing.contactPerson), objectName: "SevUser" as const },
+      invoiceDate,
+      deliveryDate: deliveryDate ? toGermanDate(deliveryDate) : invoiceDate,
+      ...(deliveryDateUntil ? { deliveryDateUntil: toGermanDate(deliveryDateUntil) } : {}),
+      status: Number(params.status ?? existing.status),
+      discount: Number(existing.discount ?? 0),
+      taxRate: Number(existing.taxRate ?? 0),
+      taxRule: { id: params.taxRule ?? String(refId(existing.taxRule)), objectName: "TaxRule" as const },
+      taxText: keep(params.taxText, existing.taxText),
+      invoiceType: params.invoiceType ?? existing.invoiceType,
+      currency: params.currency ?? existing.currency,
+      addressCountry: { id: refId(existing.addressCountry) ?? 1, objectName: "StaticCountry" as const },
+      ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined && value !== null)),
+    },
+    invoicePosSave: (params.positions ?? []).map((position) => ({
+      ...(position.id ? { id: position.id } : {}),
+      objectName: "InvoicePos" as const,
+      mapAll: true as const,
+      name: position.name,
+      ...(position.text ? { text: position.text } : {}),
+      quantity: position.quantity,
+      price: position.price,
+      taxRate: position.taxRate,
+      unity: { id: position.unityId, objectName: "Unity" as const },
+      ...(position.partId ? { part: { id: position.partId, objectName: "Part" as const } } : {}),
+      ...(position.discount !== undefined ? { discount: position.discount } : {}),
+      ...(position.id ? { invoice: { id: params.invoiceId, objectName: "Invoice" as const } } : {}),
+    })),
+    // sevdesk requires these four attributes to be last and in exactly this order.
+    invoicePosDelete: null,
+    discountSave: null,
+    discountDelete: null,
+    takeDefaultAddress: contactChanged,
   };
 }
 
@@ -200,6 +307,23 @@ export const invoiceTools = {
           })
         )
       ),
+  }),
+
+  update_invoice: defineTool({
+    title: "Update invoice",
+    description:
+      "Change a draft invoice (status 100): header fields, customer, dates and positions. Only the given fields change; everything else is kept. " +
+      "Open or paid invoices must first be reset with reset_invoice_to_draft; enshrined invoices cannot be changed. Removing positions is not supported.",
+    access: "write",
+    idempotent: true,
+    inputSchema: updateInvoiceSchema,
+    handler: async (client, params) => {
+      const existing = payload(
+        unwrap(await client.GET("/Invoice/{invoiceId}", { params: { path: { invoiceId: params.invoiceId } } }))
+      ) as Existing;
+      const body = buildUpdateInvoicePayload(existing, params);
+      return payload(unwrap(await client.POST("/Invoice/Factory/saveInvoice", { body: body as never })));
+    },
   }),
 
   get_invoice_pdf: defineTool({

@@ -98,6 +98,7 @@ Clients gezielt vor Löschen, Stornieren, Festschreiben und Versenden nachfragen
 | `get_positions_by_part` | R | Alle Verkäufe eines Artikels |
 | `list_invoice_positions_for_timeframe` | R | Umsatz je Produkt in einem Zeitraum |
 | `create_invoice` | W | Rechnung mit Positionen anlegen (Standard: Entwurf) |
+| `update_invoice` | W | Rechnungsentwurf ändern (Kopf, Kunde, Datum, Positionen ändern/hinzufügen) |
 | `create_invoice_from_order` | W | Rechnung aus Angebot/Auftrag erzeugen (auch Teil-/Abschlagsrechnung) |
 | `create_invoice_reminder` | W | Mahnung zu einer überfälligen Rechnung erzeugen |
 | `mark_invoice_as_sent` | W | Rechnung als versendet markieren |
@@ -207,6 +208,28 @@ bezahlten Beleg also zuerst `reset_voucher_to_draft` bzw. `reset_voucher_to_open
 - **Fehler**: API-Fehler kommen als lesbare Meldung mit HTTP-Status zurück. Der Client nutzt ein
   Timeout (30 s) und wiederholt bei `429` (alle Methoden) sowie bei `5xx`/Netzwerkfehlern (nur `GET`)
   mit exponentiellem Backoff.
+
+## Entwicklung und Tests
+
+```bash
+npm run check              # Typecheck + Unit-Tests (offline, simulierte API)
+npm run test:integration   # Integrationstest gegen eine echte sevdesk-Instanz
+```
+
+Die Unit-Tests brauchen keinen Token und verwenden nur erfundene Beispieldaten. Der
+Integrationstest ist opt-in und **nur für einen Testmandanten** gedacht:
+
+```bash
+# nur lesend
+SEVDESK_TEST_TOKEN=... npm run test:integration
+
+# zusätzlich Schreibzyklus (legt einen Testkontakt und einen Rechnungsentwurf an)
+SEVDESK_TEST_TOKEN=... SEVDESK_TEST_ALLOW_WRITE=1 SEVDESK_TEST_CONTACT_PERSON_ID=<sevdesk-User-ID> \
+  npm run test:integration
+```
+
+Die Tests prüfen nur die Struktur der Antworten und geben keine Inhalte aus. Rechnungsentwürfe lassen
+sich per API nicht löschen und bleiben im Testmandanten liegen.
 
 ## API-Referenz
 
